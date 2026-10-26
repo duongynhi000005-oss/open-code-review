@@ -12,11 +12,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	gitGrepMaxCount = 100
-	gitGrepTimeout  = 10 * time.Second
+	gitGrepMaxCount       = 100
+	gitGrepMaxLineBytes   = 2048
+	gitGrepMaxTotalBytes  = 100 * 1024
+	gitGrepLineTruncated  = " ... [truncated]"
+	gitGrepTimeout        = 10 * time.Second
 )
 
 // CodeSearchProvider performs text search across the repository using git grep.
@@ -199,6 +203,7 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 	}
 
 	matchCount := 0
+	totalContentBytes := 0
 	truncated := false
 	matchedFiles := make(map[string]bool)
 	for _, line := range lines {
@@ -218,12 +223,18 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 		// Count every file with a text match, including those beyond the render
 		// budget, so the truncation note can report the true matched-file count.
 		matchedFiles[fname] = true
-		if matchCount >= gitGrepMaxCount {
+		if matchCount >= gitGrepMaxCount || totalContentBytes >= gitGrepMaxTotalBytes {
 			// Keep scanning to finish counting matched files, but render no more.
 			truncated = true
 			continue
 		}
-		m := match{lineNum: ln, content: parts[offset+2]}
+		content := truncateMatchLine(parts[offset+2], gitGrepMaxLineBytes)
+		if matchCount > 0 && totalContentBytes+len(content) > gitGrepMaxTotalBytes {
+			truncated = true
+			continue
+		}
+		totalContentBytes += len(content)
+		m := match{lineNum: ln, content: content}
 		if !seen[fname] {
 			seen[fname] = true
 			fileOrder = append(fileOrder, fname)
@@ -234,7 +245,7 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 
 	var sb strings.Builder
 	if truncated {
-		sb.WriteString(fmt.Sprintf("Note: Showing the first %d matches across %d matching files. Some files are partially shown or omitted entirely. Narrow file_patterns to see the rest.\n", gitGrepMaxCount, len(matchedFiles)))
+		sb.WriteString(fmt.Sprintf("Note: Showing the first %d matches across %d matching files. Some files are partially shown or omitted entirely. Narrow file_patterns to see the rest.\n", matchCount, len(matchedFiles)))
 	}
 
 	for _, path := range fileOrder {
@@ -270,4 +281,15 @@ func isNotGitRepoError(err error, stderr string) bool {
 		return true
 	}
 	return false
+}
+
+func truncateMatchLine(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + gitGrepLineTruncated
 }

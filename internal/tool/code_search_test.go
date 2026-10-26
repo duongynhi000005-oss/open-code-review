@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/alibaba/open-code-review/internal/gitcmd"
 )
@@ -820,4 +821,68 @@ func TestBuildGrepArgs_NoIndex(t *testing.T) {
 	assertContains(t, args, "--no-index")
 	assertContains(t, args, "--exclude-standard")
 	assertNotContains(t, args, "--untracked")
+}
+
+func TestGitGrep_LongLineAndTotalByteTruncation(t *testing.T) {
+	t.Run("minified_single_line_truncated", func(t *testing.T) {
+		dir := setupTestRepo(t)
+		longLine := "publicPath=" + strings.Repeat("a", 50000) + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "bundle.min.js"), []byte(longLine), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+		got, err := p.Execute(context.Background(), map[string]any{"search_text": "publicPath"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(got, gitGrepLineTruncated) {
+			t.Fatalf("expected truncated marker %q in output, got len=%d", gitGrepLineTruncated, len(got))
+		}
+		if len(got) > gitGrepMaxLineBytes+256 {
+			t.Fatalf("expected single truncated line result to be bounded near %d bytes, got %d", gitGrepMaxLineBytes, len(got))
+		}
+		if !utf8.ValidString(got) {
+			t.Fatal("expected valid UTF-8 output after truncation")
+		}
+	})
+
+	t.Run("multibyte_utf8_boundary_safe", func(t *testing.T) {
+		// Create a string whose 2048-byte boundary falls inside a 3-byte rune.
+		prefix := strings.Repeat("x", gitGrepMaxLineBytes-1)
+		input := prefix + "你好世界" // allow-non-english: fixture exercises UTF-8 rune boundary truncation
+		got := truncateMatchLine(input, gitGrepMaxLineBytes)
+		if !utf8.ValidString(got) {
+			t.Fatalf("truncateMatchLine produced invalid UTF-8: %q", got)
+		}
+		if !strings.HasSuffix(got, gitGrepLineTruncated) {
+			t.Fatalf("expected suffix %q, got %q", gitGrepLineTruncated, got)
+		}
+	})
+
+	t.Run("total_byte_budget_caps_matches", func(t *testing.T) {
+		dir := setupTestRepo(t)
+		// 80 lines of ~2 KB each (> 100 KB total, < 100 line count cap).
+		var sb strings.Builder
+		for i := 0; i < 80; i++ {
+			sb.WriteString("budget_needle_")
+			sb.WriteString(strings.Repeat("z", 2000))
+			sb.WriteByte('\n')
+		}
+		if err := os.WriteFile(filepath.Join(dir, "large.js"), []byte(sb.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+		got, err := p.Execute(context.Background(), map[string]any{"search_text": "budget_needle_"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(got, "Some files are partially shown or omitted entirely. Narrow file_patterns to see the rest.") {
+			t.Fatalf("expected truncation notice when total byte budget is exceeded, got len=%d", len(got))
+		}
+		if len(got) > gitGrepMaxTotalBytes+4096 {
+			t.Fatalf("expected total output size bounded near %d bytes, got %d", gitGrepMaxTotalBytes, len(got))
+		}
+	})
 }

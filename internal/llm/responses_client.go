@@ -158,6 +158,16 @@ func (c *OpenAIResponsesClient) CompletionsWithCtx(ctx context.Context, req Chat
 	var opts []openaiopt.RequestOption
 	if c.cfg.ChatGPTPlan {
 		opts = append(opts, openaiopt.WithAPIKey(planToken))
+		effectiveSession := sessionKey
+		if effectiveSession == "" {
+			effectiveSession = req.SessionID
+		}
+		if effectiveSession != "" {
+			opts = append(opts,
+				openaiopt.WithHeader("session_id", effectiveSession),
+				openaiopt.WithHeader("session-id", effectiveSession),
+			)
+		}
 	}
 	for k, v := range expandSessionKeyInHeaders(c.cfg.ExtraHeaders, sessionKey) {
 		opts = append(opts, openaiopt.WithHeader(k, v))
